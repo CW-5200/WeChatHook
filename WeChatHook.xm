@@ -338,9 +338,12 @@ static char BannerLabelLastTimeKey;
 
 %end
 
-#pragma mark - 隐藏我的二维码
+static char kEmojiLongPressTimerKey;
+static char kEmojiLongPressStateKey;
+
 %hook MMUIButton
 
+// 隐藏我的二维码
 - (void)layoutSubviews {
     %orig;
 
@@ -349,6 +352,128 @@ static char BannerLabelLastTimeKey;
     if ([self.accessibilityLabel isEqualToString:@"我的二维码"]) {
         self.hidden = YES;
     }
+}
+
+// 长按搜索表情
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (WCSettingBool(@"EnableLongPressSearchEmoji") && [self.accessibilityLabel isEqualToString:@"表情"]) {
+        NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:0.5 target:self selector:@selector(tw_handleEmojiLongPressTimer:) userInfo:nil repeats:NO];
+        objc_setAssociatedObject(self, &kEmojiLongPressTimerKey, timer, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(self, &kEmojiLongPressStateKey, @(NO), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        %orig(touches, event);
+        return;
+    }
+
+    %orig(touches, event);
+}
+
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (WCSettingBool(@"EnableLongPressSearchEmoji") && [self.accessibilityLabel isEqualToString:@"表情"]) {
+        UITouch *touch = [touches anyObject];
+        if (touch) {
+            CGPoint startPoint = [touch previousLocationInView:self];
+            CGPoint currentPoint = [touch locationInView:self];
+            CGFloat dx = currentPoint.x - startPoint.x;
+            CGFloat dy = currentPoint.y - startPoint.y;
+            if (sqrt(dx*dx + dy*dy) > 10.0) {
+                NSTimer *timer = objc_getAssociatedObject(self, &kEmojiLongPressTimerKey);
+                if (timer) {
+                    [timer invalidate];
+                    objc_setAssociatedObject(self, &kEmojiLongPressTimerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                }
+            }
+        }
+        return;
+    }
+    %orig(touches, event);
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (WCSettingBool(@"EnableLongPressSearchEmoji") && [self.accessibilityLabel isEqualToString:@"表情"]) {
+        NSTimer *timer = objc_getAssociatedObject(self, &kEmojiLongPressTimerKey);
+        if (timer) {
+            [timer invalidate];
+            objc_setAssociatedObject(self, &kEmojiLongPressTimerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+
+        NSNumber *state = objc_getAssociatedObject(self, &kEmojiLongPressStateKey);
+        if (state && [state boolValue]) {
+            objc_setAssociatedObject(self, &kEmojiLongPressStateKey, @(NO), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            return;
+        }
+
+        %orig(touches, event);
+        return;
+    }
+
+    %orig(touches, event);
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (WCSettingBool(@"EnableLongPressSearchEmoji") && [self.accessibilityLabel isEqualToString:@"表情"]) {
+        NSTimer *timer = objc_getAssociatedObject(self, &kEmojiLongPressTimerKey);
+        if (timer) {
+            [timer invalidate];
+            objc_setAssociatedObject(self, &kEmojiLongPressTimerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        objc_setAssociatedObject(self, &kEmojiLongPressStateKey, @(NO), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        %orig(touches, event);
+        return;
+    }
+
+    %orig(touches, event);
+}
+
+%new
+- (void)tw_handleEmojiLongPressTimer:(NSTimer *)timer {
+    objc_setAssociatedObject(self, &kEmojiLongPressStateKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    UIResponder *responder = self;
+    Class ToolViewCls = objc_getClass("MMInputToolView");
+    while (responder && ![responder isKindOfClass:ToolViewCls]) {
+        responder = [responder nextResponder];
+    }
+    if (!responder) return;
+
+    if ([responder respondsToSelector:@selector(onExpressionButtonClicked:)]) {
+        [(id)responder onExpressionButtonClicked:nil];
+    }
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.01 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIWindow *window = [UIApplication sharedApplication].keyWindow;
+        UIView *cellView = [self tw_findSearchCellInView:window];
+        if (cellView && [cellView isKindOfClass:NSClassFromString(@"EmoticonBoardDynamicTabBarCollectionCell")]) {
+            UIView *v = cellView.superview;
+            while (v && ![v isKindOfClass:[UICollectionView class]]) {
+                v = v.superview;
+            }
+            UICollectionView *collectionView = (UICollectionView *)v;
+            if (collectionView) {
+                NSIndexPath *indexPath = [collectionView indexPathForCell:(UICollectionViewCell *)cellView];
+                if (indexPath && [collectionView.delegate respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)]) {
+                    [collectionView.delegate collectionView:collectionView didSelectItemAtIndexPath:indexPath];
+                    // 触感反馈
+                    UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+                    [gen prepare];
+                    [gen impactOccurred];
+                }
+            }
+        }
+    });
+}
+
+%new
+- (UIView *)tw_findSearchCellInView:(UIView *)view {
+    if ([view isKindOfClass:NSClassFromString(@"EmoticonBoardDynamicTabBarCollectionCell")]) {
+        return view;
+    }
+    for (UIView *sub in view.subviews) {
+        UIView *found = [self tw_findSearchCellInView:sub];
+        if (found) return found;
+    }
+    return nil;
 }
 
 %end
@@ -449,7 +574,7 @@ static void TriggerReplyFromView(UIView *sourceView) {
     SEL sel = NSSelectorFromString(@"onShowMsgReplyMenuItem:");
     if ([cell respondsToSelector:sel]) {
         [cell performSelector:sel withObject:nil];
-
+        // 触感反馈
         UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
         [gen prepare];
         [gen impactOccurred];
@@ -585,123 +710,6 @@ static void AddSwipeGestureIfNeeded(UIView *view) {
         TriggerRevokeFromView(self);
     }
 }
-%end
-
-#pragma mark - 长按输入框搜索表情
-static char kEmojiLongPressKey;
-
-%hook MMGrowTextView
-
-- (instancetype)initWithFrame:(CGRect)frame textContainer:(NSTextContainer *)textContainer {
-    self = %orig;
-    if (self) [self tw_installEmojiLongPress];
-    return self;
-}
-
-- (instancetype)initWithFrame:(CGRect)frame {
-    self = %orig;
-    if (self) [self tw_installEmojiLongPress];
-    return self;
-}
-
-- (instancetype)initWithCoder:(NSCoder *)coder {
-    self = %orig;
-    if (self) [self tw_installEmojiLongPress];
-    return self;
-}
-
-- (void)awakeFromNib {
-    %orig;
-    [self tw_installEmojiLongPress];
-}
-
-- (void)didMoveToWindow {
-    %orig;
-    [self tw_installEmojiLongPress];
-}
-
-%new
-- (void)tw_installEmojiLongPress {
-    if (!WCSettingBool(@"EnableLongPressSearchEmoji")) return;
-
-    UILongPressGestureRecognizer *exist = (UILongPressGestureRecognizer *)objc_getAssociatedObject(self, &kEmojiLongPressKey);
-    NSArray *grs = self.gestureRecognizers ?: @[];
-    if (exist && [grs containsObject:exist]) return;
-
-    UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(tw_handleEmojiLongPress:)];
-    longPress.minimumPressDuration = 0.5;
-    longPress.allowableMovement = 20;
-    longPress.cancelsTouchesInView = NO;
-    longPress.numberOfTouchesRequired = 1;
-    longPress.delegate = (id<UIGestureRecognizerDelegate>)self;
-
-    [self addGestureRecognizer:longPress];
-    objc_setAssociatedObject(self, &kEmojiLongPressKey, longPress, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-}
-
-%new
-- (void)tw_handleEmojiLongPress:(UILongPressGestureRecognizer *)gesture {
-    if (gesture.state != UIGestureRecognizerStateBegan) return;
-
-    UIResponder *responder = self;
-    Class ToolViewCls = objc_getClass("MMInputToolView");
-    while (responder && ![responder isKindOfClass:ToolViewCls]) {
-        responder = [responder nextResponder];
-    }
-    if (!responder) return;
-
-    if ([responder respondsToSelector:@selector(onExpressionButtonClicked:)]) {
-        [(id)responder onExpressionButtonClicked:nil];
-    }
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.01 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UIWindow *window = [UIApplication sharedApplication].keyWindow;
-        UIView *cellView = [self tw_findSearchCellInView:window];
-        if (cellView && [cellView isKindOfClass:NSClassFromString(@"EmoticonBoardDynamicTabBarCollectionCell")]) {
-            UIView *v = cellView.superview;
-            while (v && ![v isKindOfClass:[UICollectionView class]]) {
-                v = v.superview;
-            }
-            UICollectionView *collectionView = (UICollectionView *)v;
-            if (collectionView) {
-                NSIndexPath *indexPath = [collectionView indexPathForCell:(UICollectionViewCell *)cellView];
-                if (indexPath && [collectionView.delegate respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)]) {
-                    [collectionView.delegate collectionView:collectionView didSelectItemAtIndexPath:indexPath];
-                }
-            }
-        }
-    });
-}
-
-%new
-- (UIView *)tw_findSearchCellInView:(UIView *)view {
-    if ([view isKindOfClass:NSClassFromString(@"EmoticonBoardDynamicTabBarCollectionCell")]) {
-        return view;
-    }
-    for (UIView *sub in view.subviews) {
-        UIView *found = [self tw_findSearchCellInView:sub];
-        if (found) return found;
-    }
-    return nil;
-}
-
-%new
-- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
-    return YES;
-}
-
-%new
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
-shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
-    return YES;
-}
-
-%new
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
-shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)other {
-    return NO;
-}
-
 %end
 
 #pragma mark - 长按发送照片
